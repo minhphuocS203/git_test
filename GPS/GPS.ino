@@ -170,4 +170,4 @@ void sendTCP(String KDVD){ // gửi dữ liệu trong ham JsonWrap
   delay(2000);
  }
 
-  
+  ///aaaa
