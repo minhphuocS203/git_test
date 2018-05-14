@@ -4,42 +4,48 @@
 #define DEBUG 1
 #define delay_senddata_A9G 10
 
+typedef enum {    // khai bao cac trai thai của SendTCP_State
+  DoNothing,
+  Idle,
+  SendedTCPStart,
+  SendedTCPsend,
+  SendedData
+} SendTCP_State;
 
+SendTCP_State state  = DoNothing;
 unsigned long int previousMillis = 0;
-unsigned long int preMiliTCP = 0;
+unsigned long int previousTCP = 0;
+
+//unsigned long int previous = 0;
 
 SoftwareSerial debug_UART(10, 11); // RX TX
-SoftwareSerial GPS_UART(12, 13); // RX TX
 
-String latitude, longitude; // toa do kinh , vi do
-String latitude_tam, longitude_tam; // bien de tach 2 toa do
-float latitude_DK, longitude_DK; // bien dieu kien loc du lieu
+
 String RxData;  // du lieu GPS tra ve
-String dulieu; // du lieu tra ve tu module A7
+String latitude_tam, longitude_tam; // bien de tach 2 toa do
+String lo,la; // bien hien thi KD,VD
+float latitude, longitude; // toa do kinh , vi do
+char Jsonstring[200];  // Tạo một chuỗi tên là Jsonstring
 
 void init_A9G(); // thiet lap module
 void sendData_A9G(String command); // gửi lệnh len moule
 void getData_A9G(int timeGet); // lay Rxdata 
-void check_GPS_Frame(); // kiem tra GPS
-void check_tran_GPS(); // check and chuyen doi GPS
+bool check_GPS_Frame(); // kiem tra GPS
 void tran_GPS(); // chuyen doi GPS
+void Send_TCP_data(); // gui TCP
+void JsonWrap();  // Dong goi chuoi JSON
 
 void setup() {
+  
   Serial.begin (115200); // khoi tao cong serial giao tiep voi module
   debug_UART.begin(9600);  // khoi tao cong serial giao tiep voi may tinh
-  GPS_UART.begin (4800);  // khoi tao cong serial giao tiep voi may tinh
   init_A9G();
+
 }
 void loop() {
   getData_A9G(2000);
-  //Send_TCP_data(5000);
+  Send_TCP_data();
 }
-
-
-
-
-
-
 
 /****************************************************
   Author    : Do Hieu
@@ -66,6 +72,7 @@ void sendData_A9G(String command) {
   String dulieu = "";
   Serial.println(command); // in ra lenh ra mang hinh
   delay(delay_senddata_A9G); // thoi gian delay khi in du lieu
+  
 #if DEBUG
   while ( Serial.available()) 
   {
@@ -74,12 +81,14 @@ void sendData_A9G(String command) {
   }
   debug_UART.println(dulieu); // in du lieu phan hoi cua module len man hinh
 #endif
+
 }
+
 /****************************************************
   Author      : Do Hieu
   Description : Nhan data tu A9G qua UART
 *****************************************************/
-void getData_A9G(int timeGet) { // Luon chay
+void getData_A9G(int timeGet) {      // Luon chay
   char ch;
   while ( Serial.available())
   {
@@ -88,12 +97,26 @@ void getData_A9G(int timeGet) { // Luon chay
   }
   if (millis() - previousMillis > timeGet) {
     previousMillis = millis();
-    check_GPS_Frame();
-    check_tran_GPS();
-
-#if DEBUG
+    
+    #if DEBUG
     debug_UART.print(RxData);
-#endif
+    #endif
+    
+    check_GPS_Frame();
+    if (state == DoNothing){
+      state = Idle;
+      }
+    
+//#if DEBUG 
+//    if(check_GPS_Frame()==1)
+//     {
+//      debug_UART.println("Chuyen doi thanh cong");
+//      }
+//    else {
+//      debug_UART.println("Chuyen doi khong thanh cong");
+//      }
+//#endif
+
     RxData = ""; // Xoa du lieu
   };
 }
@@ -101,117 +124,136 @@ void getData_A9G(int timeGet) { // Luon chay
   Author      : Do Hieu
   Description :
 *****************************************************/
-void check_GPS_Frame()
+bool check_GPS_Frame()
 {
   int i=0;
   while (i < RxData.length())
   {
     if ((RxData.substring(i, i + 5) == "+GPSR")) 
-    { 
-        
+    {    
       latitude_tam = RxData.substring(25+i, 34+i); 
       longitude_tam = RxData.substring(37+i, 47+i);
-      break;
+      
+      if ((latitude_tam.toInt()!=0) && (longitude_tam.toInt()!=0)){       // kiem tra du lieu co dung hay khong
+        tran_GPS();  
+        return 1; // Chuyen doi thanh cong
+      }
+      else{
+        return 0; // Chuyen doi khong thanh cong
+      } 
     }
     i++;
   }
+  return 0; // Chuyen doi khong thanh cong
 }
 
-/****************************************************
-  Author      : Minh Phuoc
-  Description : Kiem tra và chuyển đổi
-*****************************************************/
-
-void check_tran_GPS() {
-  int j;
-        latitude_DK=latitude_tam.toInt();
-        longitude_DK=longitude_tam.toInt();
-       if ((latitude_DK!=0) && (longitude_DK!=0)){       // kiem tra du lieu co dung hay khong
-          tran_GPS();  
-        }
-        else 
-        {
-        while (j>20){        // reset lai GPS  20*10s=2000s thoi gian lay GPS
-          sendData_A9G("AT+GPS=0");
-          delay(50);
-          sendData_A9G("AT+GPS=1");
-          delay(50);
-          sendData_A9G("AT+GPSRD=10");
-          j=0;
-          break;
-          }
-          j++;
-        } 
-    }
 
 /****************************************************
   Author      : Minh Phuoc
   Description : Chuyển đổi GPS
 *****************************************************/
-
-void tran_GPS() {    //format latitude DDMM.MMMM     longitude DDDMM.MMMM 
-  //// doi kinh do latitude
+void tran_GPS() {    
+//* Doi kinh do latitude, format latitude DDMM.MMMM *//
   String LaDD, LaMM, LaMMMM, LaM; // Kinh tuyen
-  float XDD, XMM, LaDDMM ; // Kinh tuyen
-  long int XM; // kinh tuyen
+  float XMM, LaDDMM ; // Kinh tuyen
 
   LaDD = latitude_tam.substring(0, 2); // tach DD lay độ
-  XDD = LaDD.toInt(); // doi DD sang gia tri số
+  // LaDD.toInt();  doi DD sang gia tri số
  
   LaMM = latitude_tam.substring(2, 4); // tach MM truoc dau cham
   LaMMMM = latitude_tam.substring(5); // tach MMMM sau dấu chấm
-  
   LaM = LaMM + LaMMMM  ; // noi 2 chuoi lại
-  XM = LaM.toInt(); // doi MM.MMMM sang gia tri so
-  XMM = XM / (600000.0); // doi sang phut 6000000.0 module a7
+  XMM = LaM.toInt() / (600000.0); // doi sang phut (6000000.0 module a7)
+  // LaM.toInt();  doi MM.MMMM sang gia tri so
  
-  LaDDMM = XDD + XMM; // cong thuc tinh GPS
-  //latitude_DK = M;
-  latitude = String(LaDDMM, 6); // lay 6 so sau dau phay
-
-
-  //// doi vi do longitude
+  LaDDMM = LaDD.toInt() + XMM; // cong thuc tinh GPS
+  latitude = LaDDMM; // ket qua kinh tuyen
+  la = String(LaDDMM, 6); // lay 6 so sau dau phay
+  
+//** Doi vi do longitude, format longitude DDDMM.MMMM **//
   String LoDDD, LoMM, LoMMMM, LoM; // Vi tuyen
-  float ADDD, AMM, LoDDMM; // Vi tuyen
-  long int  AM; // Vi tuyen
+  float YMM, LoDDMM; // Vi tuyen
   
   LoDDD = longitude_tam.substring(0, 3); // tach DD tu chuoi ra
-  ADDD = LoDDD.toInt(); // doi DD sang gia tri số vê độ
+  // ADDD = LoDDD.toInt();  doi DD sang gia tri số vê độ
 
   LoMM = longitude_tam.substring(3, 5); // tach MM truoc dau cham
   LoMMMM = longitude_tam.substring(6); // tach MMMM con lại sau dấu chấm
   
   LoM = LoMM + LoMMMM  ; // noi 2 chuoi lại
-  AM = LoM.toInt(); // doi sang gia tri so
-  AMM = AM / (600000.0); // doi sang phut  // 6000000.0 module a7
+  YMM = LoM.toInt() / (600000.0); // doi sang phut (6000000.0 module a7)
+  // LoM.toInt(); doi sang gia tri so
   
-  LoDDMM = ADDD + AMM; // cong thuc tinh GPS
-  //longitude_DK = Z;
-  longitude = String( LoDDMM, 6); // hien 6 so sau dau phay 
-
- // hien thi GPS len tren man hinh
- #if DEBUG
+  LoDDMM = LoDDD.toInt() + YMM; // cong thuc tinh GPS
+  longitude = LoDDMM;  // ket qua vi do
+  lo = String(LoDDMM, 6); // hien 6 so sau dau phay 
+ 
+#if DEBUG
    debug_UART.println("Toa do GPS: ");
    debug_UART.println("Kinh do :");
-   debug_UART.println(latitude); // hien 6 so sau dau phay
+   debug_UART.println(la); // hien 6 so sau dau phay
    debug_UART.println("Vi do :");
-   debug_UART.println(longitude); // hien 6 so sau dau phay 
- #endif 
+   debug_UART.println(lo); // hien 6 so sau dau phay 
+#endif 
+
 }
 
-void Send_TCP_data(int timeGet)
+void Send_TCP_data()
 {
+ if (millis() - previousTCP > 2000) {
+    previousTCP = millis();
+    switch(state)
+    {
+      case Idle :
+      sendData_A9G("AT+CIPSTART=\"TCP\",\"159.65.4.55\",1334");
+      state = SendedTCPStart;
+      break;
 
-  if (millis() - preMiliTCP > timeGet) {
-      preMiliTCP = millis();
-      sendData_A9G("AT+CIPSTART=\"TCP\",\"159.65.4.55\",1334"); 
-      delay(3000);
+      case SendedTCPStart :
       sendData_A9G("AT+CIPSEND");
-      delay(50);
-      sendData_A9G(latitude);
-      sendData_A9G(latitude);
-      Serial.write(0x1A);          
-   }
+      state = SendedTCPsend;
+      break;
+
+      case SendedTCPsend :
+      JsonWrap();
+      sendData_A9G(Jsonstring);
+      state = SendedData;
+      break;
+
+      case SendedData :
+      Serial.write(0x1A);
+      state =Idle;
+      break;
+    }
+  } 
+}
+
+void JsonWrap() {                      // đóng gói dữ liệu lại theo chuẩn
+    memset(Jsonstring,'\0',200);
+    StaticJsonBuffer<400> jsonBuffer;
+    JsonObject& root = jsonBuffer.createObject();
+    JsonArray& data = root.createNestedArray("GPS");
+    
+    data.add(latitude);  // thêm 2 tọa độ vào Data
+    data.add(longitude);
+    
+    int adc=1; 
+    root["a1"] = adc;                     // các du lieu dc truyen vao
+    root["a2"] = adc + 5;
+    root["a3"] = adc + 10;
+    root["io12"] = digitalRead(12);
+    root["io13"] = digitalRead(13);
+    root["io14"] = digitalRead(14);
+    root["io15"] = digitalRead(15);
+    root["io16"] = digitalRead(16);
+    root["d1"] = random(100);
+    root["d2"] = random(100);
+    root["d3"] = random(100);
+    root["d4"] = random(100);
+    root["d5"] = random(100);
+
+    root.printTo(Jsonstring); // lưu chuối Json vừa tạo vào chuỗi Jsonstring
+      
 }
 
 
